@@ -45,7 +45,8 @@ export class Database {
         if (where) {
             _.each(_.keys(where), key => {
                 if (where[key] === undefined ||
-                    ((key.endsWith('_begin') || key.endsWith('_min') || key.endsWith('_end') || key.endsWith('_max')) && !where[key])) {
+                    ((key.endsWith('_begin') || key.endsWith('_min') || key.endsWith('_end') || key.endsWith('_max')) && !where[key]) ||
+                    (key.endsWith('_in') && !(where[key] instanceof Array))) {
                     return;
                 }
 
@@ -61,6 +62,13 @@ export class Database {
                 }
                 else if (key.endsWith('_end') || key.endsWith('_max')) {
                     sql += `${key.substring(0, key.lastIndexOf('_'))} <= ?`;
+                }
+                else if (key.endsWith('_in')) {
+                    sql += `${key.substring(0, key.lastIndexOf('_'))} IN (${where[key].map(() => '?').join(',')})`;
+                    for (let parameter of where[key]) {
+                        parameters.push(parameter);
+                    }
+                    return;
                 }
                 else {
                     sql += `${key}= ?`;
@@ -513,11 +521,21 @@ export class Database {
         });
     }
 
-    runWallCheckpoint() {
+    runWallCheckpointAll() {
+        return new Promise(resolve => {
+            async.eachSeries(_.keys(this.shards), (shardID, callback) => {
+                Database.runWallCheckpoint(this.shards[shardID].database)
+                        .then(callback)
+                        .catch(callback);
+            }, () => resolve());
+        });
+    }
+
+    static runWallCheckpoint(db) {
         return new Promise(resolve => {
             mutex.lock(['transaction'], (unlock) => {
                 console.log('[database] locking for wal checkpoint');
-                this.databaseMillix.run('PRAGMA wal_checkpoint(TRUNCATE)', function(err) {
+                db.run('PRAGMA wal_checkpoint(TRUNCATE)', function(err) {
                     if (err) {
                         console.log('[database] wal checkpoint error', err);
                     }
@@ -531,11 +549,21 @@ export class Database {
         });
     }
 
-    runVacuum() {
+    runVacuumAll() {
+        return new Promise(resolve => {
+            async.eachSeries(_.keys(this.shards), (shardID, callback) => {
+                Database.runVacuum(this.shards[shardID].database)
+                        .then(callback)
+                        .catch(callback);
+            }, () => resolve());
+        });
+    }
+
+    static runVacuum(db) {
         return new Promise(resolve => {
             mutex.lock(['transaction'], (unlock) => {
                 console.log('[database] locking for vacuum');
-                this.databaseMillix.run('VACUUM; PRAGMA wal_checkpoint(TRUNCATE);', function(err) {
+                db.run('VACUUM; PRAGMA wal_checkpoint(TRUNCATE);', function(err) {
                     if (err) {
                         console.log('[database] vacuum error', err);
                     }
@@ -612,7 +640,8 @@ export class Database {
                        .then(() => this._initializeJobEngineSqlite3())
                        .then(() => this._migrateTables())
                        .then(() => this._initializeShards())
-                       .then(() => this._initializeTables());
+                       .then(() => this._initializeTables())
+                       .then(() => this.runWallCheckpointAll());
         }
         return Promise.resolve();
     }
